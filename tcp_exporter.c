@@ -14,7 +14,21 @@ int open_connections = 0;
 int opening_connections = 0;
 int closing_connections = 0;
 int closed_connections = 0;
+int log_json_flag = 0;  // Global flag to indicate whether to log JSON data
 
+/**
+ * @brief Serves metrics in Prometheus format over HTTP.
+ *
+ * @param cls Context for the request.
+ * @param connection Connection object from MHD.
+ * @param url The requested URL.
+ * @param method The HTTP method (e.g., GET).
+ * @param version The HTTP version.
+ * @param upload_data Data uploaded via the request.
+ * @param upload_data_size Size of the uploaded data.
+ * @param con_cls Connection-specific context.
+ * @return MHD_Result result of the response queuing.
+ */
 enum MHD_Result serve_metrics(void *cls, struct MHD_Connection *connection,
                               const char *url, const char *method, const char *version,
                               const char *upload_data, size_t *upload_data_size, void **con_cls) {
@@ -43,6 +57,11 @@ enum MHD_Result serve_metrics(void *cls, struct MHD_Connection *connection,
     return ret;
 }
 
+/**
+ * @brief Starts the HTTP server to expose the metrics.
+ *
+ * @return 0 on success, 1 on failure.
+ */
 int start_http_server() {
     struct MHD_Daemon *daemon;
     daemon = MHD_start_daemon(MHD_USE_SELECT_INTERNALLY, PORT, NULL, NULL, &serve_metrics, NULL, MHD_OPTION_END);
@@ -53,6 +72,11 @@ int start_http_server() {
     return 0;
 }
 
+/**
+ * @brief Updates connection counters based on the connection state.
+ *
+ * @param state The state of the connection (Opening, Open, Closing, Closed).
+ */
 void update_connection_counters(const char *state) {
     if (strcmp(state, "Opening") == 0) {
         opening_connections++;
@@ -65,37 +89,49 @@ void update_connection_counters(const char *state) {
     }
 }
 
+/**
+ * @brief Logs connection events and updates counters based on state.
+ *
+ * @param event_type The type of event (e.g., new, update, close).
+ * @param ct The connection track object.
+ * @param state The state of the connection (e.g., Opening, Open, Closed).
+ */
 void log_connection_event(const char *event_type, struct nf_conntrack *ct, const char *state) {
-    char src_ip[INET_ADDRSTRLEN], dst_ip[INET_ADDRSTRLEN];  // Buffer for IPv4 addresses
+    char src_ip[INET_ADDRSTRLEN], dst_ip[INET_ADDRSTRLEN];
     uint32_t src, dst;
 
-    // Retrieve the original source and destination IP addresses
-    src = nfct_get_attr_u32(ct, ATTR_ORIG_IPV4_SRC);  // Original source IP
-    dst = nfct_get_attr_u32(ct, ATTR_ORIG_IPV4_DST);  // Original destination IP
+    src = nfct_get_attr_u32(ct, ATTR_ORIG_IPV4_SRC);
+    dst = nfct_get_attr_u32(ct, ATTR_ORIG_IPV4_DST);
 
-    // Convert IP addresses from binary to human-readable form
     inet_ntop(AF_INET, &src, src_ip, sizeof(src_ip));
     inet_ntop(AF_INET, &dst, dst_ip, sizeof(dst_ip));
 
-    json_object *jobj = json_object_new_object();
-    json_object_object_add(jobj, "event_type", json_object_new_string(event_type));
-    json_object_object_add(jobj, "original_source_host", json_object_new_string(src_ip));
-    json_object_object_add(jobj, "original_destination_host", json_object_new_string(dst_ip));
-    json_object_object_add(jobj, "reply_source_host", json_object_new_string(dst_ip));
-    json_object_object_add(jobj, "reply_destination_host", json_object_new_string(src_ip));
-    json_object_object_add(jobj, "state", json_object_new_string(state));
+    // Log the connection event in JSON format if the --log-json flag is set
+    if (log_json_flag) {
+        json_object *jobj = json_object_new_object();
+        json_object_object_add(jobj, "event_type", json_object_new_string(event_type));
+        json_object_object_add(jobj, "original_source_host", json_object_new_string(src_ip));
+        json_object_object_add(jobj, "original_destination_host", json_object_new_string(dst_ip));
+        json_object_object_add(jobj, "reply_source_host", json_object_new_string(dst_ip));
+        json_object_object_add(jobj, "reply_destination_host", json_object_new_string(src_ip));
+        json_object_object_add(jobj, "state", json_object_new_string(state));
 
-    // Print JSON log
-    printf("%s\n", json_object_to_json_string(jobj));
+        printf("%s\n", json_object_to_json_string(jobj));
 
-    // Update metrics based on connection state
+        json_object_put(jobj); // Free JSON object
+    }
+
     update_connection_counters(state);
-
-    json_object_put(jobj); // Free JSON object
 }
 
-
-// Event handler for connection track events
+/**
+ * @brief Callback function to handle connection tracking events.
+ *
+ * @param type The type of connection tracking message (new, update, destroy).
+ * @param ct The connection track object.
+ * @param data User-defined data (unused).
+ * @return NFCT_CB_CONTINUE to continue processing events.
+ */
 static int event_callback(enum nf_conntrack_msg_type type, struct nf_conntrack *ct, void *data) {
     switch (type) {
         case NFCT_T_NEW:
@@ -113,7 +149,22 @@ static int event_callback(enum nf_conntrack_msg_type type, struct nf_conntrack *
     return NFCT_CB_CONTINUE;
 }
 
-int main() {
+/**
+ * @brief Main function that starts the HTTP server and listens for connection events.
+ *
+ * @param argc Number of command-line arguments.
+ * @param argv Command-line arguments.
+ * @return EXIT_SUCCESS on success, EXIT_FAILURE on failure.
+ */
+int main(int argc, char *argv[]) {
+    // Check for --log-json flag in command-line arguments
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--log-json") == 0) {
+            log_json_flag = 1;  // Enable JSON logging if flag is passed
+            break;
+        }
+    }
+
     // Start the HTTP server to expose metrics
     start_http_server();
 

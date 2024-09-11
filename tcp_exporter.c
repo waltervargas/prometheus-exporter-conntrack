@@ -2,19 +2,7 @@
 #include <stdlib.h>
 #include <libnetfilter_conntrack/libnetfilter_conntrack.h>
 #include <json-c/json.h>
-#include <string.h>
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <libnetfilter_conntrack/libnetfilter_conntrack.h>
-#include <json-c/json.h>
-#include <string.h>
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <libnetfilter_conntrack/libnetfilter_conntrack.h>
-#include <json-c/json.h>
-#include <arpa/inet.h>  // For inet_ntop to convert IP addresses
+#include <arpa/inet.h> 
 #include <string.h>
 
 // Function to log connection events in JSON format

@@ -184,11 +184,11 @@ int start_http_server() {
 void log_connection_event(struct nf_conntrack *ct, const char *state) {
     char src_ip[INET_ADDRSTRLEN];
     uint32_t src_ip_bin = nfct_get_attr_u32(ct, ATTR_ORIG_IPV4_SRC);
-    uint16_t src_port = nfct_get_attr_u16(ct, ATTR_ORIG_PORT_SRC);
+    uint16_t dst_port = nfct_get_attr_u16(ct, ATTR_ORIG_PORT_DST);
 
     inet_ntop(AF_INET, &src_ip_bin, src_ip, sizeof(src_ip));
 
-    struct connection_metrics *metrics = find_or_add_metrics(src_ip, src_port);
+    struct connection_metrics *metrics = find_or_add_metrics(src_ip, dst_port);
 
     if (metrics != NULL) {
         if (strcmp(state, "Opening") == 0) {

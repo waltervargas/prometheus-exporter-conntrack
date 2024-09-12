@@ -10,6 +10,8 @@
 #define PORT 9318
 #define INITIAL_BUFFER_SIZE 1024
 
+bool log_json_flag = false;
+
 // Structure to track connections by host and port
 struct connection_metrics {
     char host[INET_ADDRSTRLEN];
@@ -182,13 +184,29 @@ int start_http_server() {
  * @param state The state of the connection (e.g., Opening, Open, Closed).
  */
 void log_connection_event(struct nf_conntrack *ct, const char *state) {
-    char src_ip[INET_ADDRSTRLEN];
+    char src_ip[INET_ADDRSTRLEN], dst_ip[INET_ADDRSTRLEN];
     uint32_t src_ip_bin = nfct_get_attr_u32(ct, ATTR_ORIG_IPV4_SRC);
-    uint16_t dst_port = nfct_get_attr_u16(ct, ATTR_ORIG_PORT_DST);
+    uint32_t dst_ip_bin = nfct_get_attr_u32(ct, ATTR_ORIG_IPV4_DST);
+    uint16_t src_port = ntohs(nfct_get_attr_u16(ct, ATTR_ORIG_PORT_SRC));
+    uint16_t dst_port = ntohs(nfct_get_attr_u16(ct, ATTR_ORIG_PORT_DST));
 
+    // Convert IPs to string format
     inet_ntop(AF_INET, &src_ip_bin, src_ip, sizeof(src_ip));
+    inet_ntop(AF_INET, &dst_ip_bin, dst_ip, sizeof(dst_ip));
 
     struct connection_metrics *metrics = find_or_add_metrics(src_ip, dst_port);
+
+    if (log_json_flag) {
+        json_object *jobj = json_object_new_object();
+        json_object_object_add(jobj, "state", json_object_new_string(state));
+        json_object_object_add(jobj, "original_source_host", json_object_new_string(src_ip));
+        json_object_object_add(jobj, "original_source_port", json_object_new_int(src_port));
+        json_object_object_add(jobj, "original_destination_host", json_object_new_string(dst_ip));
+        json_object_object_add(jobj, "original_destination_port", json_object_new_int(dst_port));
+
+        printf("%s\n", json_object_to_json_string(jobj));
+        json_object_put(jobj); // Free JSON object
+    }
 
     if (metrics != NULL) {
         if (strcmp(state, "Opening") == 0) {
@@ -227,7 +245,14 @@ static int event_callback(enum nf_conntrack_msg_type type, struct nf_conntrack *
  *
  * @return EXIT_SUCCESS on success, EXIT_FAILURE on failure.
  */
-int main() {
+int main(int argc, char **argv) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--log-json") == 0) {
+            log_json_flag = true;  // Enable JSON logging if flag is passed
+            break;
+        }
+    }
+
     if (start_http_server() == 1) {
         perror("unable to start http server");
         return EXIT_FAILURE;

@@ -177,7 +177,7 @@ enum MHD_Result serve_connections_in_prometheus_format(void *cls, struct MHD_Con
                  "conntrack_opening_connections{host=\"%s\"} %d\n"
                  "# HELP conntrack_open_connections How many open connections are there to the remote host?\n"
                  "# TYPE conntrack_open_connections gauge\n"
-                 "conntrack_opening_connections{host=\"%s\"} %d\n"
+                 "conntrack_open_connections{host=\"%s\"} %d\n"
                  "# HELP conntrack_closing_connections How many connections to the remote host are currently closing?\n"
                  "# TYPE conntrack_closing_connections gauge\n"
                  "conntrack_closing_connections{host=\"%s\"} %d\n"

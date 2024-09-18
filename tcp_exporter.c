@@ -6,11 +6,31 @@
 #include <string.h>
 #include <microhttpd.h>
 #include <netinet/tcp.h>
+#include <uthash.h>
 
 #define PORT 9318
 #define INITIAL_BUFFER_SIZE 1024
+#define MAX_HOSTS 100
 
-bool log_json_flag = false;
+enum ConnectionState {
+OPENING,
+OPEN,
+CLOSING,
+CLOSED
+};
+
+struct connection_entry {
+    char ip_port[64];  // key combination IP and port
+    enum ConnectionState state;
+    int opening_connections;
+    int open_connections;
+    int closing_connections;
+    int closed_connections;
+    UT_hash_handle hh;
+};
+
+// Hash table pointer
+struct connection_entry *connections = NULL;
 
 // Structure to track connections by host and port
 struct connection_metrics {
@@ -22,12 +42,12 @@ struct connection_metrics {
     int closed_connections;
 };
 
-#define MAX_HOSTS 100
 
 // TODO: This cannot be a global variable
 // due the fact that this have to be recomputed on per request.
 struct connection_metrics metrics[MAX_HOSTS];
 int metrics_count = 0;
+bool log_json_flag = false;
 
 /**
  * @brief Find or add a connection metric for a given host and port.
@@ -36,25 +56,55 @@ int metrics_count = 0;
  * @param port The port number.
  * @return A pointer to the corresponding connection_metrics structure.
  */
-struct connection_metrics *find_or_add_metrics(const char *ip_str, uint16_t port) {
-    for (int i = 0; i < metrics_count; i++) {
-        if (strcmp(metrics[i].host, ip_str) == 0 && metrics[i].port == port) {
-            return &metrics[i];
+struct connection_entry *find_or_add_connection(const char *ip_port) {
+    struct connection_entry *entry;
+
+    HASH_FIND_STR(connections, ip_port, entry);
+    if (entry == NULL) {
+        entry = (struct connection_entry *)malloc(sizeof(struct connection_entry));
+        strncpy(entry->ip_port, ip_port, sizeof(entry->ip_port) - 1);
+        entry->state = OPENING;
+        entry->opening_connections = 0;
+        entry->open_connections = 0;
+        entry->closing_connections = 0;
+        entry->closed_connections = 0;
+        HASH_ADD_STR(connections, ip_port, entry);
+    }
+
+    return entry;
+}
+
+void update_connection_state(const char *ip, uint16_t port, const char *state) {
+    char ip_port[64];
+    snprintf(ip_port, sizeof(ip_port), "%s:%d", ip, port);
+
+    struct connection_entry *entry = find_or_add_connection(ip_port);
+
+    if (strcmp(state, "Opening") == 0) {
+        entry->opening_connections++;
+        entry->state = OPENING;
+    } else if (strcmp(state, "Open") == 0) {
+        if (entry->state == OPENING) {
+            entry->opening_connections--;
         }
-    }
+        entry->open_connections++;
+        entry->state = OPEN;
+    } else if (strcmp(state, "Closing") == 0) {
+        if (entry->state == OPEN) {
+            entry->open_connections--;
+        }
+        entry->closing_connections++;
+        entry->state = CLOSING;
+    } else if (strcmp(state, "Closed") == 0) {
+        if (entry->state == CLOSING) {
+            entry->closing_connections--;
+        }
+        entry->closed_connections++;
+        entry->state = CLOSED;
 
-    // If not found, add a new entry
-    if (metrics_count < MAX_HOSTS) {
-        strcpy(metrics[metrics_count].host, ip_str);
-        metrics[metrics_count].port = port;
-        metrics[metrics_count].opening_connections = 0;
-        metrics[metrics_count].open_connections = 0;
-        metrics[metrics_count].closing_connections = 0;
-        metrics[metrics_count].closed_connections = 0;
-        return &metrics[metrics_count++];
+        HASH_DEL(connections, entry);
+        free(entry);
     }
-
-    return NULL;
 }
 
 /**
@@ -102,6 +152,54 @@ int append_to_buffer(char **response, size_t *response_size, const char *new_con
     // Append the new content
     strcat(*response, new_content);
     return 0;
+}
+
+// serve_connections_in_prometheus_format from connections hash table
+// This function will be called by the MHD library to serve the metrics in Prometheus format.
+// The function will iterate over the connections and add the metrics to the response buffer.
+enum MHD_Result serve_connections_in_prometheus_format(void *cls, struct MHD_Connection *connection,
+                                                       const char *url, const char *method, const char *version,
+                                                       const char *upload_data, size_t *upload_data_size, void **con_cls) {
+    size_t buffer_size = INITIAL_BUFFER_SIZE;
+    char *response = malloc(buffer_size);
+    if (!response) {
+        perror("failed to allocate memory for response");
+        return MHD_NO;
+    }
+    response[0] = '\0';
+
+    struct connection_entry *entry, *tmp;
+    HASH_ITER(hh, connections, entry, tmp) {
+        char buffer[1024];
+        snprintf(buffer, sizeof(buffer),
+                 "# HELP conntrack_opening_connections How many connections to the remote host are currently opening?\n"
+                 "# TYPE conntrack_opening_connections gauge\n"
+                 "conntrack_opening_connections{host=\"%s\"} %d\n"
+                 "# HELP conntrack_open_connections How many open connections are there to the remote host?\n"
+                 "# TYPE conntrack_open_connections gauge\n"
+                 "conntrack_opening_connections{host=\"%s\"} %d\n"
+                 "# HELP conntrack_closing_connections How many connections to the remote host are currently closing?\n"
+                 "# TYPE conntrack_closing_connections gauge\n"
+                 "conntrack_closing_connections{host=\"%s\"} %d\n"
+                 "# HELP conntrack_closed_connections How many connections to the remote host have recently closed?\n"
+                 "# TYPE conntrack_closed_connections gauge\n"
+                 "conntrack_closed_connections{host=\"%s\"} %d\n",
+                 entry->ip_port, entry->opening_connections,
+                 entry->ip_port, entry->open_connections,
+                 entry->ip_port, entry->closing_connections,
+                 entry->ip_port, entry->closed_connections);
+
+        if (append_to_buffer(&response, &buffer_size, buffer)) {
+            free(response);
+            return MHD_NO;
+        }
+    }
+
+    struct MHD_Response *http_response;
+    http_response = MHD_create_response_from_buffer(strlen(response), (void *)response, MHD_RESPMEM_MUST_FREE);
+    enum MHD_Result ret = MHD_queue_response(connection, MHD_HTTP_OK, http_response);
+    MHD_destroy_response(http_response);
+    return ret;
 }
 
 /**
@@ -169,7 +267,7 @@ enum MHD_Result serve_metrics(void *cls, struct MHD_Connection *connection,
  */
 int start_http_server() {
     struct MHD_Daemon *daemon;
-    daemon = MHD_start_daemon(MHD_USE_INTERNAL_POLLING_THREAD, PORT, NULL, NULL, &serve_metrics, NULL, MHD_OPTION_END);
+    daemon = MHD_start_daemon(MHD_USE_INTERNAL_POLLING_THREAD, PORT, NULL, NULL, &serve_connections_in_prometheus_format, NULL, MHD_OPTION_END);
     if (NULL == daemon) {
         return 1;
     }
@@ -194,7 +292,7 @@ void log_connection_event(struct nf_conntrack *ct, const char *state) {
     inet_ntop(AF_INET, &src_ip_bin, src_ip, sizeof(src_ip));
     inet_ntop(AF_INET, &dst_ip_bin, dst_ip, sizeof(dst_ip));
 
-    struct connection_metrics *metrics = find_or_add_metrics(src_ip, dst_port);
+    update_connection_state(src_ip, dst_port, state);
 
     if (log_json_flag) {
         json_object *jobj = json_object_new_object();
@@ -206,18 +304,6 @@ void log_connection_event(struct nf_conntrack *ct, const char *state) {
 
         printf("%s\n", json_object_to_json_string(jobj));
         json_object_put(jobj); // Free JSON object
-    }
-
-    if (metrics != NULL) {
-        if (strcmp(state, "Opening") == 0) {
-            metrics->opening_connections++;
-        } else if (strcmp(state, "Open") == 0) {
-            metrics->open_connections++;
-        } else if (strcmp(state, "Closing") == 0) {
-            metrics->closing_connections++;
-        } else if (strcmp(state, "Closed") == 0) {
-            metrics->closed_connections++;
-        }
     }
 }
 
